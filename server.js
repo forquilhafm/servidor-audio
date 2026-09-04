@@ -6,57 +6,73 @@ const app = express()
 const server = createServer(app)
 const port = process.env.PORT || 10000
 
-// Rota HTTP essencial para o Render monitorar a saúde do servidor (Health Check)
 app.get('/', (req, res) => {
-  res.send('Servidor de Sinalizacao WebRTC Ativo e Saudavel!')
+  res.send('Servidor WebRTC Ativo!')
 })
 
-// Configura o servidor WebSocket na rota /ws
 const wss = new WebSocket.Server({ server, path: '/ws' })
+
+// Variáveis para guardar temporariamente as conexões ativas de cada lado
+let transmissor = null;
+let receptor = null;
 
 function heartbeat() {
   this.isAlive = true
 }
 
 wss.on('connection', (ws) => {
-  console.log('Cliente conectado ao WebSocket')
   ws.isAlive = true
-  
   ws.on('error', console.error)
-  ws.on('pong', heartbeat) // Responde ao ping automático para manter a conexão ativa
+  ws.on('pong', heartbeat)
 
   ws.on('message', (message) => {
-    const msgString = message.toString()
-    
-    // RETRANSMISSÃO: Envia as chaves WebRTC de um estúdio para o outro
+    const data = JSON.parse(message.toString());
+
+    // 1. Estúdio A avisa que o microfone está pronto
+    if (data.type === 'producer-ready') {
+      transmissor = ws;
+      console.log('Estúdio A (Transmissor) está pronto.');
+      // Se o receptor já estiver esperando na linha, avisa o transmissor para ligar o P2P
+      if (receptor && receptor.readyState === WebSocket.OPEN) {
+        transmissor.send(JSON.stringify({ type: 'start-call' }));
+      }
+    }
+
+    // 2. Estúdio B avisa que a escuta está aberta
+    if (data.type === 'consumer-joined') {
+      receptor = ws;
+      console.log('Estúdio B (Receptor) entrou.');
+      // Se o transmissor já estiver online, dá o comando para ele começar a gerar a oferta WebRTC
+      if (transmissor && transmissor.readyState === WebSocket.OPEN) {
+        transmissor.send(JSON.stringify({ type: 'start-call' }));
+      }
+    }
+
+    // 3. Encaminha as mensagens técnicas de oferta, resposta e candidatos ICE entre as pontas
     wss.clients.forEach((client) => {
       if (client !== ws && client.readyState === WebSocket.OPEN) {
-        client.send(msgString)
+        client.send(JSON.stringify(data));
       }
-    })
-  })
+    });
+  });
 
   ws.on('close', () => {
-    console.log('Cliente desconectou')
-  })
-})
+    if (ws === transmissor) transmissor = null;
+    if (ws === receptor) receptor = null;
+    console.log('Um estúdio desconectou');
+  });
+});
 
-// LOOP DE PING: Mantém a conexão viva a cada 30 segundos contra o timeout do Render
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) {
-      console.log('Removendo conexão inativa...')
-      return ws.terminate()
-    }
+    if (ws.isAlive === false) return ws.terminate()
     ws.isAlive = false
     ws.ping()
   })
 }, 30000)
 
-wss.on('close', () => {
-  clearInterval(interval)
-})
+wss.on('close', () => clearInterval(interval))
 
 server.listen(port, () => {
-  console.log(`Servidor escutando na porta ${port}`)
+  console.log(`Servidor rodando na porta ${port}`)
 })
